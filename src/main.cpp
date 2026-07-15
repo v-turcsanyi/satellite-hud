@@ -459,6 +459,40 @@ OrbitData parse_csv_gp(const char* csv) {
     return data;
 }
 
+AzEl elset_to_azel(ElsetRec satrec, OrbitData orbit) {
+    bool success = sgp4init('i', &satrec);
+    if (!success) {
+        Serial1.println("SGP4 initialization failed!");
+    }
+    // Serial1.println(satrec.error);
+    double position_vector[3] = {0.0, 0.0, 0.0};
+    double velocity_vector[3] = {0.0, 0.0, 0.0};
+
+    double jdNow = getCurrentJulianDate();
+    double julianDelta = jdNow - orbit.epoch;
+    double minutesSinceEpoch = julianDelta * 1440.0; // 1440 minutes in a day
+
+    sgp4(&satrec, minutesSinceEpoch, position_vector, velocity_vector);
+
+    auto observer = predict_create_observer("home",
+        my_latitude * DEG_TO_RAD,
+        my_longitude * DEG_TO_RAD,
+        my_altitude
+    );
+    predict_observation observation = {};
+    predict_position position = {
+        .time     = predict_to_julian(time(nullptr)),
+        .position = { position_vector[0], position_vector[1], position_vector[2] },
+        .velocity = { velocity_vector[0], velocity_vector[1], velocity_vector[2] }
+    };
+    predict_observe_orbit(observer, &position, &observation);
+    AzEl azel = {
+        .azimuth = observation.azimuth * RAD_TO_DEG,
+        .elevation = observation.elevation * RAD_TO_DEG
+    };
+    return azel;
+}
+
 // OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT
 void calculateExampleSatellites() {
     while (!hasTime) {
@@ -488,40 +522,10 @@ void calculateExampleSatellites() {
         satrec.epochyr = orbit.epoch_year % 100;
         satrec.epochdays = orbit.epoch - jdJan1 + 1.0;
 
-        bool success = sgp4init('i', &satrec);
-        if (!success) {
-            Serial1.println("SGP4 initialization failed!");
-        }else {
-            // Serial1.println(satrec.error);
-            double position_vector[3] = {0.0, 0.0, 0.0};
-            double velocity_vector[3] = {0.0, 0.0, 0.0};
-
-            double jdNow = getCurrentJulianDate();
-            double julianDelta = jdNow - orbit.epoch;
-            double minutesSinceEpoch = julianDelta * 1440.0; // 1440 minutes in a day
-
-            sgp4(&satrec, minutesSinceEpoch, position_vector, velocity_vector);
-
-            auto observer = predict_create_observer("home",
-                my_latitude * DEG_TO_RAD,
-                my_longitude * DEG_TO_RAD,
-                my_altitude
-            );
-            predict_observation observation = {};
-            predict_position position = {
-                .time     = predict_to_julian(time(nullptr)),
-                .position = { position_vector[0], position_vector[1], position_vector[2] },
-                .velocity = { velocity_vector[0], velocity_vector[1], velocity_vector[2] }
-            };
-            predict_observe_orbit(observer, &position, &observation);
-            AzEl azel = {
-                .azimuth = observation.azimuth * RAD_TO_DEG,
-                .elevation = observation.elevation * RAD_TO_DEG
-            };
-            if (azel.elevation > 0) {
-                ScreenXY screenxy = azel_to_xy(azel);
-                drawIcon(screenxy.x, screenxy.y, 0xffffffff, HUD_CROSSHAIR_ARROWS_H);
-            }
+        AzEl azel = elset_to_azel(satrec, orbit);
+        if (azel.elevation > 0) {
+            ScreenXY screenxy = azel_to_xy(azel);
+            drawIcon(screenxy.x, screenxy.y, 0xffffffff, HUD_CROSSHAIR_ARROWS_H);
         }
     }
 }
