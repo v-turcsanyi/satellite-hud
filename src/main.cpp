@@ -28,6 +28,27 @@ enum HudStyle : uint8_t {
     HUD_CIRCLE,
 };
 
+struct OrbitData {
+    double mean_motion;
+    double eccentricity;
+    double inclination;
+    double raan;
+    double arg_pericenter;
+    double mean_anomaly;
+    double bstar;
+    double mean_dot;
+    double mean_ddot;
+    double epoch;
+    int epoch_year;
+    /* // these fields take up space unnecessarily
+    int epoch_month;
+    int epoch_day;
+    int epoch_hour;
+    int epoch_minute;
+    double epoch_second;
+    */
+};
+
 // Constellation chosen for having relatively few satellites
 const char* const EXAMPLE_TLES[] = {
 // OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT
@@ -40,6 +61,8 @@ const char* const EXAMPLE_TLES[] = {
     "MERIDIAN 10,2022-030A,2026-07-14T21:13:15.158208,2.00609355,.6791727,62.6772,137.8054,272.8407,17.6020,0,U,52145,999,3158,0,.131E-5,0",
     "MERIDIAN-M 21L,2026-071A,2026-07-15T03:02:27.959136,2.00614348,.7160193,62.8162,225.0128,285.3167,11.3278,0,U,68571,999,207,0,.125E-5,0",
 };
+
+OrbitData example_satellites[std::size(EXAMPLE_TLES)];
 
 // TODO: get from GPS server
 constexpr double my_latitude = 47.0;
@@ -346,6 +369,96 @@ double csvEpochToJulianDate(int year, int month, int day, int hour, int minute, 
 
 constexpr double REVS_DAY_TO_RAD_MIN = (2 * PI) / 1440.0;
 
+OrbitData parse_csv_gp(const char* csv) {
+    CsvRowParser parser(csv);
+    char buf[32];
+    TLE sat;
+    char satName[24] = {0};
+    char epochStr[28] = {0};
+    double epochJd = 0.0;
+    // Column 0: OBJECT_NAME (string)
+    parser.nextColumn(satName, sizeof(satName));
+
+    // Column 1: OBJECT_ID (string) - skip (not needed for propagation)
+    parser.nextColumn(nullptr, 0);
+
+    // Column 2: EPOCH (ISO Timestamp: "2026-07-14T23:01:59.000000")
+    parser.nextColumn(epochStr, sizeof(epochStr));
+
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0;
+    double second = 0.0;
+    if (sscanf(epochStr, "%d-%d-%dT%d:%d:%lf", &year, &month, &day, &hour, &minute, &second) == 6) {
+        epochJd = csvEpochToJulianDate(year, month, day, hour, minute, second);
+    } else {
+        Serial1.print("Failed to parse ISO Epoch timestamp for ");
+        Serial1.print(satName);
+        Serial1.println("!");
+    }
+
+    // Column 3: MEAN_MOTION (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.n = strtod(buf, nullptr);
+
+    // Column 4: ECCENTRICITY (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.ecc = strtod(buf, nullptr);
+
+    // Column 5: INCLINATION (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.incDeg = strtod(buf, nullptr);
+
+    // Column 6: RA_OF_ASC_NODE (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.raanDeg = strtod(buf, nullptr);
+
+    // Column 7: ARG_OF_PERICENTER (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.argpDeg = strtod(buf, nullptr);
+
+    // Column 8: MEAN_ANOMALY (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.maDeg = strtod(buf, nullptr);
+
+    // Column 9: EPHEMERIS_TYPE - skip
+    parser.nextColumn(nullptr, 0);
+
+    // Column 10: CLASSIFICATION_TYPE - skip
+    parser.nextColumn(nullptr, 0);
+
+    // Column 11: NORAD_CAT_ID - skip
+    parser.nextColumn(nullptr, 0);
+
+    // Column 11: ELEMENT_SE_NO - skip
+    parser.nextColumn(nullptr, 0);
+
+    // Column 11: REV_AT_EPOCH - skip (not needed for propagation)
+    parser.nextColumn(nullptr, 0);
+
+    // Column 11: BSTAR (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.bstar = strtod(buf, nullptr);
+
+    // Column 11: MEAN_MOTION_DOT (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.ndot = strtod(buf, nullptr);
+
+    // Column 11: MEAN_MOTION_DDOT (double)
+    if (parser.nextColumn(buf, sizeof(buf))) sat.nddot = strtod(buf, nullptr);
+
+    OrbitData data = {
+        .mean_motion = sat.n,
+        .eccentricity = sat.ecc,
+        .inclination = sat.incDeg,
+        .raan = sat.raanDeg,
+        .arg_pericenter = sat.argpDeg,
+        .mean_anomaly = sat.maDeg,
+        .bstar = sat.bstar,
+        .mean_dot = sat.ndot,
+        .mean_ddot = sat.nddot,
+        .epoch = epochJd,
+        .epoch_year = year,
+        /*
+        .epoch_month = month,
+        .epoch_day = day,
+        .epoch_hour = hour,
+        .epoch_minute = minute,
+        .epoch_second = second,*/
+    };
+    return data;
+}
+
 // OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT
 void calculateExampleSatellites() {
     while (!hasTime) {
@@ -353,100 +466,38 @@ void calculateExampleSatellites() {
     }
     constexpr size_t num_rows = std::size(EXAMPLE_TLES);
     for (int i = 0; i < num_rows; i+= 1) {
-        CsvRowParser parser(EXAMPLE_TLES[i]);
-        char buf[32];
-        TLE sat;
-        char satName[24] = {0};
-        char epochStr[28] = {0};
-        double epochJd = 0.0;
-        // Column 0: OBJECT_NAME (string)
-        parser.nextColumn(satName, sizeof(satName));
-        Serial1.println(satName);
-
-        // Column 1: OBJECT_ID (string) - skip (not needed for propagation)
-        parser.nextColumn(nullptr, 0);
-
-        // Column 2: EPOCH (ISO Timestamp: "2026-07-14T23:01:59.000000")
-        parser.nextColumn(epochStr, sizeof(epochStr));
-
-        int year = 0, month = 0, day = 0, hour = 0, minute = 0;
-        double second = 0.0;
-        if (sscanf(epochStr, "%d-%d-%dT%d:%d:%lf", &year, &month, &day, &hour, &minute, &second) == 6) {
-            epochJd = csvEpochToJulianDate(year, month, day, hour, minute, second);
-        } else {
-            Serial1.println("Failed to parse ISO Epoch timestamp!");
-            continue;
-        }
-
-        // Column 3: MEAN_MOTION (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.n = strtod(buf, nullptr);
-
-        // Column 4: ECCENTRICITY (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.ecc = strtod(buf, nullptr);
-
-        // Column 5: INCLINATION (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.incDeg = strtod(buf, nullptr);
-
-        // Column 6: RA_OF_ASC_NODE (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.raanDeg = strtod(buf, nullptr);
-
-        // Column 7: ARG_OF_PERICENTER (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.argpDeg = strtod(buf, nullptr);
-
-        // Column 8: MEAN_ANOMALY (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.maDeg = strtod(buf, nullptr);
-
-        // Column 9: EPHEMERIS_TYPE - skip
-        parser.nextColumn(nullptr, 0);
-
-        // Column 10: CLASSIFICATION_TYPE - skip
-        parser.nextColumn(nullptr, 0);
-
-        // Column 11: NORAD_CAT_ID - skip
-        parser.nextColumn(nullptr, 0);
-
-        // Column 11: ELEMENT_SE_NO - skip
-        parser.nextColumn(nullptr, 0);
-
-        // Column 11: REV_AT_EPOCH - skip (not needed for propagation)
-        parser.nextColumn(nullptr, 0);
-
-        // Column 11: BSTAR (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.bstar = strtod(buf, nullptr);
-
-        // Column 11: MEAN_MOTION_DOT (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.ndot = strtod(buf, nullptr);
-
-        // Column 11: MEAN_MOTION_DDOT (double)
-        if (parser.nextColumn(buf, sizeof(buf))) sat.nddot = strtod(buf, nullptr);
-
+        auto orbit = parse_csv_gp(EXAMPLE_TLES[i]);
+        example_satellites[i] = orbit;
+    }
+    for (int i = 0; i < num_rows; i+= 1) {
+        auto orbit = example_satellites[i];
         ElsetRec satrec = {};
         satrec.whichconst = 2;
-        satrec.no_kozai = sat.n * REVS_DAY_TO_RAD_MIN;
-        satrec.ecco = sat.ecc;
-        satrec.inclo = sat.incDeg* DEG_TO_RAD;
-        satrec.nodeo = sat.raanDeg* DEG_TO_RAD;
-        satrec.argpo = sat.argpDeg* DEG_TO_RAD;
-        satrec.mo = sat.maDeg* DEG_TO_RAD;
-        satrec.bstar = sat.bstar;
-        satrec.ndot = sat.ndot;
-        satrec.nddot = sat.nddot;
-        satrec.jdsatepoch = epochJd;
+        satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
+        satrec.ecco = orbit.eccentricity;
+        satrec.inclo = orbit.inclination * DEG_TO_RAD;
+        satrec.nodeo = orbit.raan * DEG_TO_RAD;
+        satrec.argpo = orbit.arg_pericenter * DEG_TO_RAD;
+        satrec.mo = orbit.mean_anomaly * DEG_TO_RAD;
+        satrec.bstar = orbit.bstar;
+        satrec.ndot = orbit.mean_dot;
+        satrec.nddot = orbit.mean_ddot;
+        satrec.jdsatepoch = orbit.epoch;
 
-        double jdJan1 = csvEpochToJulianDate(year, 1, 1, 0, 0, 0.0);
-        satrec.epochyr = year % 100;
-        satrec.epochdays = epochJd - jdJan1 + 1.0;
+        double jdJan1 = csvEpochToJulianDate(orbit.epoch_year, 1, 1, 0, 0, 0.0);
+        satrec.epochyr = orbit.epoch_year % 100;
+        satrec.epochdays = orbit.epoch - jdJan1 + 1.0;
 
         bool success = sgp4init('i', &satrec);
         if (!success) {
-            Serial1.println("Line initialization failed!");
+            Serial1.println("SGP4 initialization failed!");
         }else {
             // Serial1.println(satrec.error);
             double position_vector[3] = {0.0, 0.0, 0.0};
             double velocity_vector[3] = {0.0, 0.0, 0.0};
 
             double jdNow = getCurrentJulianDate();
-            double julianDelta = jdNow - epochJd;
+            double julianDelta = jdNow - orbit.epoch;
             double minutesSinceEpoch = julianDelta * 1440.0; // 1440 minutes in a day
 
             sgp4(&satrec, minutesSinceEpoch, position_vector, velocity_vector);
@@ -601,15 +652,16 @@ void setup() {
     initDisplay();
 
     xTaskCreate(renderTask, "render", 2048, NULL, 2, &xRenderTaskHandle);
-    xTaskCreate(wifiTask, "wifi", 2048, NULL, 2, &xWifiTaskHandle);
-    xTaskCreate(timeSyncTask, "timesync", 2048, NULL, 2, &xTimeSyncTaskHandle);
-    xTaskCreate(calculateTask1, "calculate1", 2048, NULL, 2, &xCalculateTaskHandle1);
-    xTaskCreate(calculateTask2, "calculate2", 2048, NULL, 2, &xCalculateTaskHandle2);
+    xTaskCreate(wifiTask, "wifi", 2048, NULL, 1, &xWifiTaskHandle);
+    xTaskCreate(timeSyncTask, "timesync", 2048, NULL, 1, &xTimeSyncTaskHandle);
+    xTaskCreate(calculateTask1, "calculate1", 2048, NULL, 0, &xCalculateTaskHandle1);
+    xTaskCreate(calculateTask2, "calculate2", 2048, NULL, 0, &xCalculateTaskHandle2);
 
     vTaskCoreAffinitySet(xCalculateTaskHandle1, (1 << 0));
     vTaskCoreAffinitySet(xCalculateTaskHandle2, (1 << 1));
 
     vTaskCoreAffinitySet(xWifiTaskHandle, (1 << 0));
+    vTaskCoreAffinitySet(xTimeSyncTaskHandle, (1 << 0));
 
     vTaskCoreAffinitySet(xRenderTaskHandle, (1 << 1));
     led_off();
