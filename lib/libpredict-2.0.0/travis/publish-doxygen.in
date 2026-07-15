@@ -1,0 +1,52 @@
+#!/bin/bash -e
+
+if [ -z "$TRAVIS" ]; then
+    (>&2 echo "Do not run outside travis.")
+    exit
+fi
+
+API_DOC_RELATIVE_PATH="api/this_should_never_happen"
+if [ "XX$TRAVIS_BRANCH" == "XXmaster" -a "XX$CC" == "XXgcc" ]; then
+    API_DOC_RELATIVE_PATH=api/master
+elif [ "XX$TRAVIS_BRANCH" != "XXv@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@" -o "XX$CC" != "XXgcc" ]; then
+    (>&2 echo "Skipping documentation build for all except gcc builds on master and")
+    (>&2 echo "branches named v<major>.<minor>.")
+    exit
+else
+    API_DOC_RELATIVE_PATH=api/master
+fi
+
+set -x
+
+# Settings
+REPO_PATH="https://$gh_pages_username:$gh_pages_oauth_token@github.com/la1k/libpredict.git"
+DOXYGEN_OUTPUT_PATH=@CMAKE_CURRENT_BINARY_DIR@/../doc/html
+GH_PAGES_PATH=@CMAKE_CURRENT_BINARY_DIR@/../gh-pages
+API_DOC_PATH=${GH_PAGES_PATH}/${API_DOC_RELATIVE_PATH}
+COMMIT_USER="Documentation builder"
+COMMIT_EMAIL="libpredict-admin@la1k.no"
+CHANGESET=$(git rev-parse --verify HEAD)
+
+# Get a clean version of the HTML documentation repo.
+rm -rf ${GH_PAGES_PATH}
+mkdir -p ${GH_PAGES_PATH}
+git clone -b gh-pages "${REPO_PATH}" --single-branch ${GH_PAGES_PATH}
+
+# rm all the files through git to prevent stale files.
+cd ${GH_PAGES_PATH}
+test -d ${API_DOC_PATH} && git rm -rf ${API_DOC_RELATIVE_PATH}
+cd @CMAKE_CURRENT_BINARY_DIR@/..
+
+# Generate the HTML documentation.
+make doc
+mkdir -p ${API_DOC_PATH}
+cp -rp ${DOXYGEN_OUTPUT_PATH}/* ${API_DOC_PATH}
+
+# Create and commit the documentation repo.
+cd ${API_DOC_PATH}
+git add .
+git config user.name "${COMMIT_USER}"
+git config user.email "${COMMIT_EMAIL}"
+git commit -m "Automated documentation build for changeset ${CHANGESET}."
+git push origin gh-pages
+cd -
