@@ -95,6 +95,15 @@ const char* const EXAMPLE_TLES[] = {
     "GPS BIII-8  (PRN 21),2025-116A,2026-07-16T00:06:34.149024,2.00573669,.00084315,55.2543,29.9713,339.3849,21.2010,0,U,64202,999,845,0,-.76E-6,0",
     "GPS BIII-9  (PRN 20),2026-017A,2026-07-15T02:48:10.740672,2.00570507,.00216395,55.1061,87.6342,260.3058,99.5008,0,U,67588,999,43217,0,-.26E-6,0",
     "GPS BIII-10 (PRN 13),2026-087A,2026-07-15T11:14:09.755808,2.00572628,.00204615,54.9617,206.6692,106.0864,353.1427,0,U,68791,999,140,0,.49E-6,0",
+
+    "MERIDIAN 3,2010-058A,2026-07-09T18:27:35.722944,2.00587874,.68509399,63.4411,89.2315,261.0130,22.0759,0,U,37212,999,11491,0,.54E-6,0",
+    "MERIDIAN 4,2011-018A,2026-07-13T23:18:56.570112,5.40628584,.52889339,62.0676,65.1507,267.4278,34.0159,0,U,37398,999,11155,.27134285E-2,.45209687E+0,.11304679E-4",
+    "MERIDIAN 6,2012-063A,2026-07-14T12:03:56.545056,2.00739527,.7357038,63.9798,351.2807,228.2149,40.6548,0,U,38995,999,10005,0,.159E-5,0",
+    "MERIDIAN 7,2014-069A,2026-07-15T02:25:49.380672,2.00597796,.663829,63.4500,212.6028,270.3812,19.8405,0,U,40296,999,8579,0,.274E-5,0",
+    "MERIDIAN 8,2019-046A,2026-07-14T15:15:58.143168,2.00596653,.7082133,63.1528,47.2167,274.9299,14.5835,0,U,44453,999,5089,0,-.44E-6,0",
+    "MERIDIAN 9,2020-015A,2026-07-14T09:16:08.940576,2.00607359,.6849779,65.5367,316.1061,277.4394,15.6570,0,U,45254,999,4683,0,-.9E-7,0",
+    "MERIDIAN 10,2022-030A,2026-07-14T21:13:15.158208,2.00609355,.6791727,62.6772,137.8054,272.8407,17.6020,0,U,52145,999,3158,0,.131E-5,0",
+    "MERIDIAN-M 21L,2026-071A,2026-07-15T03:02:27.959136,2.00614348,.7160193,62.8162,225.0128,285.3167,11.3278,0,U,68571,999,207,0,.125E-5,0",
 };
 
 OrbitData example_satellites[std::size(EXAMPLE_TLES)];
@@ -304,8 +313,8 @@ ScreenXY azel_to_xy(AzEl azel) {
     double sin_azimuth = sin(azel.azimuth * DEG_TO_RAD);
     double cos_azimuth = cos(azel.azimuth * DEG_TO_RAD);
 
-    this_xy.x = round((sin_azimuth * (90 - azel.elevation) * (120.0 / 90.0)) + 120);
-    this_xy.y = round((-cos_azimuth * (90 - azel.elevation) * (120.0 / 90.0)) + 120);
+    this_xy.x = round((sin_azimuth * (90 - max(min(azel.elevation, 90), 0)) * (120.0 / 90.0)) + 120);
+    this_xy.y = round((-cos_azimuth * (90 - max(min(azel.elevation, 90), 0)) * (120.0 / 90.0)) + 120);
 
     return this_xy;
 }
@@ -566,7 +575,6 @@ void calculateExampleSatellites() {
             AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
             if (azel.elevation > 0) {
                 ScreenXY screenxy = azel_to_xy(azel);
-                drawIcon(screenxy.x, screenxy.y, 0xff00ff, HUD_CIRCLE);
                 AzEl previousAzEl = {
                     .azimuth = azel.azimuth,
                     .elevation = azel.elevation
@@ -579,7 +587,7 @@ void calculateExampleSatellites() {
                     if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
                         continue;
                     }
-                    if (nextAzEl.elevation > 0 && previousAzEl.elevation > 0) {
+                    if (nextAzEl.elevation > 0 || previousAzEl.elevation > 0) {
                         ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
                         ScreenXY screenxy_next = azel_to_xy(nextAzEl);
                         canvas.drawLine(
@@ -587,11 +595,12 @@ void calculateExampleSatellites() {
                             (int32_t) round(screenxy_prev.y),
                             (int32_t) round(screenxy_next.x),
                             (int32_t) round(screenxy_next.y),
-                            HEX565(0x0000ff));
+                            HEX565(0x444444));
                     }
                     previousAzEl.azimuth = nextAzEl.azimuth;
                     previousAzEl.elevation = nextAzEl.elevation;
                 }
+                drawIcon(screenxy.x, screenxy.y, 0x0000ff, HUD_CROSSHAIR_ARROWS_H);
             }
         }
     }
