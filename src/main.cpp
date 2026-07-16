@@ -459,29 +459,21 @@ OrbitData parse_csv_gp(const char* csv) {
     return data;
 }
 
-AzEl elset_to_azel(ElsetRec satrec, OrbitData orbit) {
-    bool success = sgp4init('i', &satrec);
-    if (!success) {
-        Serial1.println("SGP4 initialization failed!");
-    }
+AzEl elset_to_azel(ElsetRec satrec, double jdTarget, double original_epoch, const predict_observer_t* observer) {
     // Serial1.println(satrec.error);
     double position_vector[3] = {0.0, 0.0, 0.0};
     double velocity_vector[3] = {0.0, 0.0, 0.0};
 
-    double jdNow = getCurrentJulianDate();
-    double julianDelta = jdNow - orbit.epoch;
+    double julianDelta = jdTarget - original_epoch;
     double minutesSinceEpoch = julianDelta * 1440.0; // 1440 minutes in a day
 
     sgp4(&satrec, minutesSinceEpoch, position_vector, velocity_vector);
 
-    auto observer = predict_create_observer("home",
-        my_latitude * DEG_TO_RAD,
-        my_longitude * DEG_TO_RAD,
-        my_altitude
-    );
+    auto targetUnixTime = (time_t)((jdTarget - 2440587.5) * 86400.0);
+
     predict_observation observation = {};
     predict_position position = {
-        .time     = predict_to_julian(time(nullptr)),
+        .time     = predict_to_julian(targetUnixTime),
         .position = { position_vector[0], position_vector[1], position_vector[2] },
         .velocity = { velocity_vector[0], velocity_vector[1], velocity_vector[2] }
     };
@@ -498,6 +490,12 @@ void calculateExampleSatellites() {
     while (!hasTime) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    auto observer = predict_create_observer(
+        "home",
+        my_latitude * DEG_TO_RAD,
+        my_longitude * DEG_TO_RAD,
+        my_altitude
+    );
     constexpr size_t num_rows = std::size(EXAMPLE_TLES);
     for (int i = 0; i < num_rows; i+= 1) {
         auto orbit = parse_csv_gp(EXAMPLE_TLES[i]);
@@ -522,33 +520,71 @@ void calculateExampleSatellites() {
         satrec.epochyr = orbit.epoch_year % 100;
         satrec.epochdays = orbit.epoch - jdJan1 + 1.0;
 
-        AzEl azel = elset_to_azel(satrec, orbit);
-        if (azel.elevation > 0) {
-            ScreenXY screenxy = azel_to_xy(azel);
-            drawIcon(screenxy.x, screenxy.y, 0xffffffff, HUD_CROSSHAIR_ARROWS_H);
+        double jdNow = getCurrentJulianDate();
+
+        bool success = sgp4init('i', &satrec);
+        if (!success) {
+            Serial1.println("SGP4 initialization failed!");
+        }
+        else {
+            ElsetRec temp_satrec = satrec;
+            AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
+            if (azel.elevation > 0) {
+                ScreenXY screenxy = azel_to_xy(azel);
+                drawIcon(screenxy.x, screenxy.y, 0xffffffff, HUD_CROSSHAIR_ARROWS_H);
+                AzEl previousAzEl = {
+                    .azimuth = azel.azimuth,
+                    .elevation = azel.elevation
+                };
+                constexpr double range = 1.0; // 1 day
+                constexpr double step = 1.0 / 24.0 / 60.0 * 10; // 10 minutes
+                for (double j = 0; j < range; j += step) {
+                    temp_satrec = satrec;
+                    AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
+                    if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
+                        continue;
+                    }
+                    if (nextAzEl.elevation > 0 && previousAzEl.elevation > 0) {
+                        ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
+                        ScreenXY screenxy_next = azel_to_xy(nextAzEl);
+                        canvas.drawLine(
+                            (int32_t) round(screenxy_prev.x),
+                            (int32_t) round(screenxy_prev.y),
+                            (int32_t) round(screenxy_next.x),
+                            (int32_t) round(screenxy_next.y),
+                            HEX565(0x0000ff));
+                    }
+                    previousAzEl.azimuth = nextAzEl.azimuth;
+                    previousAzEl.elevation = nextAzEl.elevation;
+                }
+            }
         }
     }
+    predict_destroy_observer(observer);
 }
 
 TaskHandle_t xRenderTaskHandle;
 [[noreturn]]
 void renderTask(void *pvParameters) {
-    drawGrid();
-
-    calculateExampleSatellites();
-
-    /*
-    // calibrate the Az-El conversion engine
-    drawIconAzEl(0, 0, 0x0275ff, HUD_CROSSHAIR_SIMPLE);
-    drawIconAzEl(0, 45, 0x0275ff, HUD_CROSSHAIR_ARROWS);
-    drawIconAzEl(45, 45, 0xff9100, HUD_TARGET_BOX);
-    drawIconAzEl(0, 90, 0xff9100, HUD_CROSSHAIR_ARROWS);
-    */
-
-    canvas.pushSprite(0, 0);
-    takeScreenshot();
+    led_on();
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        drawGrid();
+
+        calculateExampleSatellites();
+
+        /*
+        // calibrate the Az-El conversion engine
+        drawIconAzEl(0, 0, 0x0275ff, HUD_CROSSHAIR_SIMPLE);
+        drawIconAzEl(0, 45, 0x0275ff, HUD_CROSSHAIR_ARROWS);
+        drawIconAzEl(45, 45, 0xff9100, HUD_TARGET_BOX);
+        drawIconAzEl(0, 90, 0xff9100, HUD_CROSSHAIR_ARROWS);
+        */
+
+        canvas.pushSprite(0, 0);
+        takeScreenshot();
+        led_off();
+        vTaskDelay(pdMS_TO_TICKS(1000 * 10));
+        led_on();
     }
 }
 
