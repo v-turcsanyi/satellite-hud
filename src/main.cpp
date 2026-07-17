@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <time.h>
 
+#include <flatbuffers/flatbuffers.h>
 #include <LittleFS.h>
 
 #include "../lib/sgp4/TLE.h"
@@ -81,8 +82,8 @@ struct OrbitData {
     double arg_pericenter;
     double mean_anomaly;
     double bstar;
-    double mean_dot;
-    double mean_ddot;
+    // double mean_dot; // not used in SGP4
+    // double mean_ddot;
     double epoch;
     int epoch_year;
     /* // these fields take up space unnecessarily
@@ -486,8 +487,8 @@ OrbitData parse_csv_gp(const char* csv) {
         .arg_pericenter = sat.argpDeg,
         .mean_anomaly = sat.maDeg,
         .bstar = sat.bstar,
-        .mean_dot = sat.ndot,
-        .mean_ddot = sat.nddot,
+        // .mean_dot = sat.ndot,
+        // .mean_ddot = sat.nddot,
         .epoch = epochJd,
         .epoch_year = year,
         /*
@@ -612,8 +613,6 @@ void calculateExampleSatellites() {
                     satrec.argpo = orbit.arg_pericenter * DEG_TO_RAD;
                     satrec.mo = orbit.mean_anomaly * DEG_TO_RAD;
                     satrec.bstar = orbit.bstar;
-                    satrec.ndot = orbit.mean_dot;
-                    satrec.nddot = orbit.mean_ddot;
                     satrec.jdsatepoch = orbit.epoch;
 
                     double jdJan1 = csvEpochToJulianDate(orbit.epoch_year, 1, 1, 0, 0, 0.0);
