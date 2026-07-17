@@ -534,83 +534,143 @@ auto observer = predict_create_observer(
     );
 // OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT
 void calculateExampleSatellites() {
+    while (WiFi.status() != 3 /*WL_CONNECTED*/) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
     while (!hasTime) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     uint32_t lastMillis = millis();
-    File file = LittleFS.open("/satellites.csv", "r");
-    if (!file) {
-        Serial1.println("Failed to open file for reading");
+
+    WiFiClient client;
+    const char *server_ip = HTTP_SERVER_ADDRESS;
+    uint16_t server_port = HTTP_PORT;
+    const char *csv_path = HTTP_FILE;
+
+    Serial1.printf("Connecting to %s:%d\n", server_ip, server_port);
+
+    if (!client.connect(server_ip, server_port)) {
+        Serial1.println("HTTP connection failed.");
         return;
     }
-    Serial1.println("Starting rendering");
-    while (file.available()) {
-        String line = file.readStringUntil('\n');
-        line.trim();
+    client.printf("GET /%s HTTP/1.1\r\n", csv_path);
+    client.printf("Host: %s\r\n", server_ip);
+    client.print("Connection: close\r\n\r\n");
 
-        if (line.length() == 0 || line.startsWith("#") || line.startsWith("OBJECT_NAME")) {
-            continue;
-        }
-
-        auto orbit = parse_csv_gp(line.c_str());
-        ElsetRec satrec = {};
-        satrec.whichconst = 2;
-        satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
-        satrec.ecco = orbit.eccentricity;
-        satrec.inclo = orbit.inclination * DEG_TO_RAD;
-        satrec.nodeo = orbit.raan * DEG_TO_RAD;
-        satrec.argpo = orbit.arg_pericenter * DEG_TO_RAD;
-        satrec.mo = orbit.mean_anomaly * DEG_TO_RAD;
-        satrec.bstar = orbit.bstar;
-        satrec.ndot = orbit.mean_dot;
-        satrec.nddot = orbit.mean_ddot;
-        satrec.jdsatepoch = orbit.epoch;
-
-        double jdJan1 = csvEpochToJulianDate(orbit.epoch_year, 1, 1, 0, 0, 0.0);
-        satrec.epochyr = orbit.epoch_year % 100;
-        satrec.epochdays = orbit.epoch - jdJan1 + 1.0;
-
-        double jdNow = getCurrentJulianDate();
-
-        bool success = sgp4init('i', &satrec);
-        if (!success) {
-            Serial1.println("SGP4 initialization failed!");
-        }
-        else {
-            ElsetRec temp_satrec = satrec;
-            AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
-            if (azel.elevation > 0) {
-                ScreenXY screenxy = azel_to_xy(azel);
-                /*AzEl previousAzEl = {
-                    .azimuth = azel.azimuth,
-                    .elevation = azel.elevation
-                };
-                constexpr double range = 1.0; // 1 day
-                constexpr double step = 1.0 / 24.0 / 60.0 * 10; // 10 minutes
-                for (double j = 0; j < range; j += step) {
-                    temp_satrec = satrec;
-                    AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
-                    if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
-                        continue;
-                    }
-                    if (nextAzEl.elevation > 0 || previousAzEl.elevation > 0) {
-                        ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
-                        ScreenXY screenxy_next = azel_to_xy(nextAzEl);
-                        canvas.drawLine(
-                            (int32_t) round(screenxy_prev.x),
-                            (int32_t) round(screenxy_prev.y),
-                            (int32_t) round(screenxy_next.x),
-                            (int32_t) round(screenxy_next.y),
-                            HEX565(0x444444));
-                    }
-                    previousAzEl.azimuth = nextAzEl.azimuth;
-                    previousAzEl.elevation = nextAzEl.elevation;
-                }*/
-                drawIcon(screenxy.x, screenxy.y, 0x0000ff, ICON_RADIUS, HUD_PIXEL);
+    uint8_t consecutiveNewlines = 0;
+    while (client.connected() || client.available()) {
+        if (client.available()) {
+            char c = client.read();
+            if (c == '\r') {
+                continue; // Ignore carriage returns completely
             }
+            if (c == '\n') {
+                consecutiveNewlines++;
+                if (consecutiveNewlines == 2) {
+                    break; // CSV begins next byte
+                }
+            } else {
+                consecutiveNewlines = 0; // Reset if we see normal characters
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
-    file.close();
+
+    Serial1.println("Starting rendering");
+    char lineBuffer[256];
+    size_t charIndex = 0;
+
+    while (client.connected() || client.available()) {
+        while (client.available()) {
+            char c = client.read();
+
+            if (c == '\n') {
+                lineBuffer[charIndex] = '\0'; // Null-terminate
+
+                // Handle Windows-style lines (\r\n) cleanly
+                if (charIndex > 0 && lineBuffer[charIndex - 1] == '\r') {
+                    lineBuffer[charIndex - 1] = '\0';
+                }
+
+                uint8_t comment_progress = 0;
+                if (charIndex > 0 && lineBuffer[0] != '#') {
+                    if (strncmp(lineBuffer, "OBJECT_NAME", 11) == 0) {
+                        // Serial1.println("Comment line skipped");
+                        charIndex = 0;
+                        continue;
+                    }
+                    // Serial1.println(lineBuffer);
+
+                    auto orbit = parse_csv_gp(lineBuffer);
+                    ElsetRec satrec = {};
+                    satrec.whichconst = 2;
+                    satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
+                    satrec.ecco = orbit.eccentricity;
+                    satrec.inclo = orbit.inclination * DEG_TO_RAD;
+                    satrec.nodeo = orbit.raan * DEG_TO_RAD;
+                    satrec.argpo = orbit.arg_pericenter * DEG_TO_RAD;
+                    satrec.mo = orbit.mean_anomaly * DEG_TO_RAD;
+                    satrec.bstar = orbit.bstar;
+                    satrec.ndot = orbit.mean_dot;
+                    satrec.nddot = orbit.mean_ddot;
+                    satrec.jdsatepoch = orbit.epoch;
+
+                    double jdJan1 = csvEpochToJulianDate(orbit.epoch_year, 1, 1, 0, 0, 0.0);
+                    satrec.epochyr = orbit.epoch_year % 100;
+                    satrec.epochdays = orbit.epoch - jdJan1 + 1.0;
+
+                    double jdNow = getCurrentJulianDate();
+
+                    bool success = sgp4init('i', &satrec);
+                    if (!success) {
+                        Serial1.println("SGP4 initialization failed!");
+                    } else {
+                        ElsetRec temp_satrec = satrec;
+                        AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
+                        if (azel.elevation > 0) {
+                            ScreenXY screenxy = azel_to_xy(azel);
+                            /*AzEl previousAzEl = {
+                                .azimuth = azel.azimuth,
+                                .elevation = azel.elevation
+                            };
+                            constexpr double range = 1.0; // 1 day
+                            constexpr double step = 1.0 / 24.0 / 60.0 * 10; // 10 minutes
+                            for (double j = 0; j < range; j += step) {
+                                temp_satrec = satrec;
+                                AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
+                                if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
+                                    continue;
+                                }
+                                if (nextAzEl.elevation > 0 || previousAzEl.elevation > 0) {
+                                    ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
+                                    ScreenXY screenxy_next = azel_to_xy(nextAzEl);
+                                    canvas.drawLine(
+                                        (int32_t) round(screenxy_prev.x),
+                                        (int32_t) round(screenxy_prev.y),
+                                        (int32_t) round(screenxy_next.x),
+                                        (int32_t) round(screenxy_next.y),
+                                        HEX565(0x444444));
+                                }
+                                previousAzEl.azimuth = nextAzEl.azimuth;
+                                previousAzEl.elevation = nextAzEl.elevation;
+                            }*/
+                            drawIcon(screenxy.x, screenxy.y, 0x0000ff, ICON_RADIUS, HUD_PIXEL);
+                        }
+                    }
+                }
+
+                charIndex = 0; // Reset index for next line
+            } else {
+                if (charIndex < sizeof(lineBuffer) - 1) {
+                    lineBuffer[charIndex++] = c;
+                }
+            }
+        }
+        // Yield for 1 tick to let the lwIP Wi-Fi stack process background packets
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    client.stop();
     Serial1.print(millis() - lastMillis);
     Serial1.println(" ms");
     Serial1.println("Rendering done");
@@ -761,6 +821,20 @@ void memoryDiagnosticsTask(void *pvParameters) {
     }
 }
 
+TaskHandle_t xDownloadTaskHandle;
+void downloadTask(void *pvParameters) {
+    led_on();
+
+    while (WiFi.status() != 3 /*WL_CONNECTED*/) {
+        led_off();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        led_on();
+    }
+
+    led_off();
+    vTaskDelete(NULL);
+}
+
 void initDisplay() {
     tft.init();
     tft.setRotation(0);
@@ -786,6 +860,8 @@ void setup() {
 
     initDisplay();
 
+    xTaskCreate(downloadTask, "download", 2048, NULL, 0, &xDownloadTaskHandle);
+    printMemoryStatus("download");
     xTaskCreate(renderTask, "render", 2048, NULL, 2, &xRenderTaskHandle);
     printMemoryStatus("diagnostics");
     xTaskCreate(wifiTask, "wifi", 1024, NULL, 1, &xWifiTaskHandle);
