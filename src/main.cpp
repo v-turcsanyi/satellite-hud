@@ -15,6 +15,37 @@
 #include "../lib/libpredict-2.0.0/src/unsorted.h"
 #include "../lib/libpredict-2.0.0/include/predict/predict.h"
 
+#define TLE_NAME_MAX_LEN 25
+typedef struct SatelliteRenderable {
+    char name[TLE_NAME_MAX_LEN];
+    uint32_t norad_id;
+    bool visible;
+    uint8_t current_x;
+    uint8_t current_y;
+    uint8_t xCoordinatesPass1[128];
+    uint8_t yCoordinatesPass1[128];
+    uint8_t xCoordinatesPass2[128];
+    uint8_t yCoordinatesPass2[128];
+} SatelliteRenderable;
+
+uint32_t norad_ids[] = {
+    // various
+    25544, // ISS (ZARYA)
+    // L bamd
+    57166, // METEOR-M2 3
+    59051, // METEOR-M2 4
+    38771, // METOP-B
+    43689, // METOP-C
+    60543, // ARCTIC WEATHER SATELLITE
+    41105, // ELEKTRO-L 2
+    // S band
+    26958, // PROBA-1
+    36037, // PROBA-2
+    39159, // PROBA-V
+    41240, // JASON-3
+    24479, // HINODE (SOLAR-B)
+};
+
 void printMemoryStatus(const char* stepName) {
     struct mallinfo mi = mallinfo();
     size_t free_heap = mi.fordblks;
@@ -147,8 +178,7 @@ void drawGrid() {
 #define ICON_RADIUS 10
 
 // the screen is 240x240 pixels, 8 bits are enough
-void drawIcon(uint8_t x, uint8_t y, uint32_t color, HudStyle style) {
-    uint8_t radius = ICON_RADIUS;
+void drawIcon(uint8_t x, uint8_t y, uint32_t color, uint8_t radius, HudStyle style) {
     switch (style) {
         case HUD_CROSSHAIR_SIMPLE:
             canvas.drawFastVLine(x, y - radius, radius - 1, HEX565(color));
@@ -333,13 +363,13 @@ TaskHandle_t xTimeSyncTaskHandle;
     }
 }
 
-void drawIconAzEl(double az, double el, uint32_t color, HudStyle style) {
+void drawIconAzEl(double az, double el, uint32_t color, uint8_t radius, HudStyle style) {
     AzEl azel = {
         .azimuth = az,
         .elevation = el
     };
     ScreenXY screenxy = azel_to_xy(azel);
-    drawIcon(screenxy.x, screenxy.y, color, style);
+    drawIcon(screenxy.x, screenxy.y, color, radius, style);
 }
 
 double getCurrentJulianDate() {
@@ -576,7 +606,7 @@ void calculateExampleSatellites() {
                     previousAzEl.azimuth = nextAzEl.azimuth;
                     previousAzEl.elevation = nextAzEl.elevation;
                 }*/
-                drawIcon(screenxy.x, screenxy.y, 0x0000ff, HUD_PIXEL);
+                drawIcon(screenxy.x, screenxy.y, 0x0000ff, ICON_RADIUS, HUD_PIXEL);
             }
         }
     }
@@ -586,12 +616,46 @@ void calculateExampleSatellites() {
     Serial1.println("Rendering done");
 }
 
+void drawSun() {
+    predict_observation observation = {};
+    predict_julian_date_t julian_time = predict_to_julian(time(nullptr));
+    predict_observe_sun(observer, julian_time, &observation);
+    AzEl azel = {
+        .azimuth = observation.azimuth * RAD_TO_DEG,
+        .elevation = observation.elevation * RAD_TO_DEG
+    };
+    if (azel.elevation >= 0) {
+        drawIconAzEl(azel.azimuth, azel.elevation, 0xaaaa00, 5, HUD_CIRCLE);
+    }
+    predict_observe_moon(observer, julian_time, &observation);
+    azel = {
+        .azimuth = observation.azimuth * RAD_TO_DEG,
+        .elevation = observation.elevation * RAD_TO_DEG
+    };
+    if (azel.elevation >= 0) {
+        drawIconAzEl(azel.azimuth, azel.elevation, 0x888888, 5, HUD_CIRCLE);
+    }
+}
+
+void drawVipSatellites() {
+
+}
+
+void drawBackgroundSatellites() {
+
+}
+
 TaskHandle_t xRenderTaskHandle;
 [[noreturn]]
 void renderTask(void *pvParameters) {
-    led_on();
     while (true) {
+        led_on();
+
         drawGrid();
+        drawSun();
+
+        drawVipSatellites();
+        drawBackgroundSatellites();
 
         calculateExampleSatellites();
 
@@ -607,7 +671,6 @@ void renderTask(void *pvParameters) {
         takeScreenshot();
         led_off();
         vTaskDelay(pdMS_TO_TICKS(1000 * 10));
-        led_on();
     }
 }
 
