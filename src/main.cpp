@@ -39,6 +39,7 @@ enum HudStyle : uint8_t {
     HUD_CROSSHAIR_ARROWS_H,
     HUD_TARGET_BOX,
     HUD_CIRCLE,
+    HUD_PIXEL,
 };
 
 struct OrbitData {
@@ -207,6 +208,9 @@ void drawIcon(uint8_t x, uint8_t y, uint32_t color, HudStyle style) {
         case HUD_CIRCLE:
             // outer frame
             canvas.drawCircle(x, y, radius, HEX565(color));
+            break;
+        case HUD_PIXEL:
+            canvas.drawPixel(x, y, HEX565(color));
             break;
     }
 }
@@ -385,11 +389,20 @@ OrbitData parse_csv_gp(const char* csv) {
 
     int year = 0, month = 0, day = 0, hour = 0, minute = 0;
     double second = 0.0;
-    if (sscanf(epochStr, "%d-%d-%dT%d:%d:%lf", &year, &month, &day, &hour, &minute, &second) == 6) {
+    if (strlen(epochStr) >= 19) {
+        year   = atoi(epochStr);
+        month  = atoi(epochStr + 5);
+        day    = atoi(epochStr + 8);
+        hour   = atoi(epochStr + 11);
+        minute = atoi(epochStr + 14);
+        second = strtod(epochStr + 17, nullptr);
+
         epochJd = csvEpochToJulianDate(year, month, day, hour, minute, second);
     } else {
-        Serial1.print("Failed to parse ISO Epoch timestamp for ");
+        Serial1.print("Failed to parse ISO epoch for ");
         Serial1.print(satName);
+        Serial1.print(": ");
+        Serial1.println(epochStr);
         Serial1.println("!");
     }
 
@@ -494,6 +507,7 @@ void calculateExampleSatellites() {
     while (!hasTime) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    uint32_t lastMillis = millis();
     File file = LittleFS.open("/satellites.csv", "r");
     if (!file) {
         Serial1.println("Failed to open file for reading");
@@ -537,7 +551,7 @@ void calculateExampleSatellites() {
             AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
             if (azel.elevation > 0) {
                 ScreenXY screenxy = azel_to_xy(azel);
-                AzEl previousAzEl = {
+                /*AzEl previousAzEl = {
                     .azimuth = azel.azimuth,
                     .elevation = azel.elevation
                 };
@@ -561,12 +575,14 @@ void calculateExampleSatellites() {
                     }
                     previousAzEl.azimuth = nextAzEl.azimuth;
                     previousAzEl.elevation = nextAzEl.elevation;
-                }
-                drawIcon(screenxy.x, screenxy.y, 0x0000ff, HUD_CROSSHAIR_ARROWS_H);
+                }*/
+                drawIcon(screenxy.x, screenxy.y, 0x0000ff, HUD_PIXEL);
             }
         }
     }
     file.close();
+    Serial1.print(millis() - lastMillis);
+    Serial1.println(" ms");
     Serial1.println("Rendering done");
 }
 
@@ -595,25 +611,15 @@ void renderTask(void *pvParameters) {
     }
 }
 
-void calculate() {
-
-}
-
-TaskHandle_t xCalculateTaskHandle1;
+TaskHandle_t xBgWorkerTaskHandle1;
+TaskHandle_t xBgWorkerTaskHandle2;
 [[noreturn]]
-void calculateTask1(void *pvParameters) {
+void bgWorkerTask(void *pvParameters) {
+    Serial1.printf("Worker started on core %d\n", RP2040::cpuid());
     while (true) {
-        calculate();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
+        if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
 
-TaskHandle_t xCalculateTaskHandle2;
-[[noreturn]]
-void calculateTask2(void *pvParameters) {
-    while (true) {
-        calculate();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
 }
 
@@ -718,19 +724,19 @@ void setup() {
     initDisplay();
 
     xTaskCreate(renderTask, "render", 2048, NULL, 2, &xRenderTaskHandle);
-        printMemoryStatus("diagnostics");
+    printMemoryStatus("diagnostics");
     xTaskCreate(wifiTask, "wifi", 1024, NULL, 1, &xWifiTaskHandle);
-        printMemoryStatus("diagnostics");
+    printMemoryStatus("diagnostics");
     xTaskCreate(timeSyncTask, "timesync", 1024, NULL, 1, &xTimeSyncTaskHandle);
-        printMemoryStatus("diagnostics");
-    xTaskCreate(calculateTask1, "calculate1", 512, NULL, 0, &xCalculateTaskHandle1);
-        printMemoryStatus("calculate1");
-    xTaskCreate(calculateTask2, "calculate2", 512, NULL, 0, &xCalculateTaskHandle2);
-        printMemoryStatus("calculate2");
+    printMemoryStatus("diagnostics");
+    xTaskCreate(bgWorkerTask, "calculate1", 512, NULL, 0, &xBgWorkerTaskHandle1);
+    printMemoryStatus("calculate1");
+    xTaskCreate(bgWorkerTask, "calculate2", 512, NULL, 0, &xBgWorkerTaskHandle2);
+    printMemoryStatus("calculate2");
     xTaskCreate(memoryDiagnosticsTask, "memory_diagnostics", 512, NULL, 3, &xMemoryDiagnosticsTaskHandle);
 
-    vTaskCoreAffinitySet(xCalculateTaskHandle1, (1 << 0));
-    vTaskCoreAffinitySet(xCalculateTaskHandle2, (1 << 1));
+    vTaskCoreAffinitySet(xBgWorkerTaskHandle1, (1 << 0));
+    vTaskCoreAffinitySet(xBgWorkerTaskHandle2, (1 << 1));
 
     vTaskCoreAffinitySet(xWifiTaskHandle, (1 << 0));
     vTaskCoreAffinitySet(xTimeSyncTaskHandle, (1 << 0));
