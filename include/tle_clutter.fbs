@@ -1,0 +1,20 @@
+namespace tle;
+
+// OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT
+// not all fields are actually used
+struct OrbitParameters_clutter {
+    EPOCH:double;
+    MEAN_MOTION:double;
+    ECCENTRICITY:double;
+    INCLINATION:double;
+    RA_OF_ASC_NODE:double;
+    ARG_OF_PERICENTER:double;
+    MEAN_ANOMALY:double;
+    BSTAR:double;
+}
+
+table satellite_clutter{
+    orbit:OrbitParameters_clutter;
+}
+
+root_type satellite_clutter;

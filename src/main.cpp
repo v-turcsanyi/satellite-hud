@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <FreeRTOS.h>
 #include <task.h>
+#include <semphr.h>
 #include <TFT_eSPI.h>
 
 #include <WiFi.h>
@@ -10,6 +11,8 @@
 
 #include <flatbuffers/flatbuffers.h>
 #include <LittleFS.h>
+#include "tle_clutter_generated.h"
+#include "tle_named_generated.h"
 
 #include "../lib/sgp4/TLE.h"
 #include "../lib/sgp4/SGP4.h"
@@ -58,6 +61,12 @@ void printMemoryStatus(const char* stepName) {
         );
 }
 
+#define clutter_filename "/clutter.fb"
+#define named_filename "/named.fb"
+
+SemaphoreHandle_t clutter_mutex = NULL;
+SemaphoreHandle_t named_mutex = NULL;
+
 const char *ssid = STASSID;
 const char *password = STAPSK;
 
@@ -85,8 +94,8 @@ struct OrbitData {
     // double mean_dot; // not used in SGP4
     // double mean_ddot;
     double epoch;
-    int epoch_year;
     /* // these fields take up space unnecessarily
+    int epoch_year;
     int epoch_month;
     int epoch_day;
     int epoch_hour;
@@ -248,7 +257,9 @@ void drawIcon(uint8_t x, uint8_t y, uint32_t color, uint8_t radius, HudStyle sty
 
 void takeScreenshot() {
     while (!Serial) {
+        led_off();
         vTaskDelay(pdMS_TO_TICKS(100));
+        led_on();
     }
     uint16_t* fb = (uint16_t*)canvas.getPointer();
     if (!fb) {
@@ -345,8 +356,11 @@ public:
 bool hasTime = false;
 TaskHandle_t xTimeSyncTaskHandle;
 [[noreturn]] void timeSyncTask(void *pvParameters) {
+    led_on();
     while (!ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) {
+        led_off();
         vTaskDelay(pdMS_TO_TICKS(100));
+        led_on();
     }
     NTP.begin("192.168.100.88");
     Serial1.println("Waiting for NTP sync");
@@ -360,7 +374,9 @@ TaskHandle_t xTimeSyncTaskHandle;
         struct tm timeinfo;
         localtime_r(&now, &timeinfo);
         Serial1.println(asctime(&timeinfo));
+        led_off();
         vTaskDelay(pdMS_TO_TICKS(10 * 60 * 1000));
+        led_on();
     }
 }
 
@@ -402,11 +418,12 @@ double csvEpochToJulianDate(int year, int month, int day, int hour, int minute, 
 
 constexpr double REVS_DAY_TO_RAD_MIN = (2 * PI) / 1440.0;
 
-OrbitData parse_csv_gp(const char* csv) {
+void parse_csv_gp(const char* csv, File output_file, const char *vip_file_path) {
     CsvRowParser parser(csv);
+    flatbuffers::FlatBufferBuilder builder(512);
     char buf[32];
     TLE sat;
-    char satName[24] = {0};
+    char satName[25] = {0};
     char epochStr[28] = {0};
     double epochJd = 0.0;
     // Column 0: OBJECT_NAME (string)
@@ -461,8 +478,9 @@ OrbitData parse_csv_gp(const char* csv) {
     // Column 10: CLASSIFICATION_TYPE - skip
     parser.nextColumn(nullptr, 0);
 
-    // Column 11: NORAD_CAT_ID - skip
-    parser.nextColumn(nullptr, 0);
+    uint32_t norad_cat_id = 0;
+    // Column 11: NORAD_CAT_ID (uint32)
+    if (parser.nextColumn(buf, sizeof(buf))) norad_cat_id = strtoul(buf, nullptr, 10);
 
     // Column 11: ELEMENT_SE_NO - skip
     parser.nextColumn(nullptr, 0);
@@ -479,26 +497,70 @@ OrbitData parse_csv_gp(const char* csv) {
     // Column 11: MEAN_MOTION_DDOT (double)
     if (parser.nextColumn(buf, sizeof(buf))) sat.nddot = strtod(buf, nullptr);
 
-    OrbitData data = {
-        .mean_motion = sat.n,
-        .eccentricity = sat.ecc,
-        .inclination = sat.incDeg,
-        .raan = sat.raanDeg,
-        .arg_pericenter = sat.argpDeg,
-        .mean_anomaly = sat.maDeg,
-        .bstar = sat.bstar,
-        // .mean_dot = sat.ndot,
-        // .mean_ddot = sat.nddot,
-        .epoch = epochJd,
-        .epoch_year = year,
-        /*
-        .epoch_month = month,
-        .epoch_day = day,
-        .epoch_hour = hour,
-        .epoch_minute = minute,
-        .epoch_second = second,*/
-    };
-    return data;
+    bool in_vip_list = false;
+    for (uint32_t norad_id: norad_ids) {
+        if (norad_id == norad_cat_id) {
+            in_vip_list = true;
+            break;
+        }
+    }
+    if (in_vip_list) {
+        Serial1.print("\033[32m");
+    }else {
+        Serial1.print("\033[31m");
+    }
+    Serial1.print(satName);
+    Serial1.println("\033[0m");
+    if (in_vip_list) {
+        if (xSemaphoreTake(named_mutex, portMAX_DELAY) == pdTRUE) {
+            File file_vip = LittleFS.open(vip_file_path, "a");
+            if (!file_vip) {
+                Serial1.println("Failed to open file (named satellites) for writing");
+                xSemaphoreGive(named_mutex);
+                return;
+            }
+            const tle::OrbitParameters_named orbit_parameters{
+                epochJd,
+                sat.n,
+                sat.ecc,
+                sat.incDeg,
+                sat.raanDeg,
+                sat.argpDeg,
+                sat.maDeg,
+                sat.bstar
+            };
+            const auto serialized_name = builder.CreateString(satName);
+            flatbuffers::Offset<tle::satellite_named> serialized = tle::Createsatellite_named(
+                builder,
+                serialized_name,
+                norad_cat_id,
+                &orbit_parameters
+            );
+            builder.FinishSizePrefixed(serialized);
+            file_vip.write(builder.GetBufferPointer(), builder.GetSize());
+            builder.Clear();
+            file_vip.close();
+            xSemaphoreGive(named_mutex);
+        }
+    }else {
+        const tle::OrbitParameters_clutter orbit_parameters{
+            epochJd,
+            sat.n,
+            sat.ecc,
+            sat.incDeg,
+            sat.raanDeg,
+            sat.argpDeg,
+            sat.maDeg,
+            sat.bstar
+        };
+        flatbuffers::Offset<tle::satellite_clutter> serialized = tle::Createsatellite_clutter(
+            builder,
+            &orbit_parameters
+        );
+        builder.FinishSizePrefixed(serialized);
+        output_file.write(builder.GetBufferPointer(), builder.GetSize());
+        builder.Clear();
+    }
 }
 
 AzEl elset_to_azel(ElsetRec satrec, double jdTarget, double original_epoch, const predict_observer_t* observer) {
@@ -533,147 +595,6 @@ auto observer = predict_create_observer(
         my_longitude * DEG_TO_RAD,
         my_altitude
     );
-// OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT
-void calculateExampleSatellites() {
-    while (WiFi.status() != 3 /*WL_CONNECTED*/) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    while (!hasTime) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    uint32_t lastMillis = millis();
-
-    WiFiClient client;
-    const char *server_ip = HTTP_SERVER_ADDRESS;
-    uint16_t server_port = HTTP_PORT;
-    const char *csv_path = HTTP_FILE;
-
-    Serial1.printf("Connecting to %s:%d\n", server_ip, server_port);
-
-    if (!client.connect(server_ip, server_port)) {
-        Serial1.println("HTTP connection failed.");
-        return;
-    }
-    client.printf("GET /%s HTTP/1.1\r\n", csv_path);
-    client.printf("Host: %s\r\n", server_ip);
-    client.print("Connection: close\r\n\r\n");
-
-    uint8_t consecutiveNewlines = 0;
-    while (client.connected() || client.available()) {
-        if (client.available()) {
-            char c = client.read();
-            if (c == '\r') {
-                continue; // Ignore carriage returns completely
-            }
-            if (c == '\n') {
-                consecutiveNewlines++;
-                if (consecutiveNewlines == 2) {
-                    break; // CSV begins next byte
-                }
-            } else {
-                consecutiveNewlines = 0; // Reset if we see normal characters
-            }
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
-    }
-
-    Serial1.println("Starting rendering");
-    char lineBuffer[256];
-    size_t charIndex = 0;
-
-    while (client.connected() || client.available()) {
-        while (client.available()) {
-            char c = client.read();
-
-            if (c == '\n') {
-                lineBuffer[charIndex] = '\0'; // Null-terminate
-
-                // Handle Windows-style lines (\r\n) cleanly
-                if (charIndex > 0 && lineBuffer[charIndex - 1] == '\r') {
-                    lineBuffer[charIndex - 1] = '\0';
-                }
-
-                uint8_t comment_progress = 0;
-                if (charIndex > 0 && lineBuffer[0] != '#') {
-                    if (strncmp(lineBuffer, "OBJECT_NAME", 11) == 0) {
-                        // Serial1.println("Comment line skipped");
-                        charIndex = 0;
-                        continue;
-                    }
-                    // Serial1.println(lineBuffer);
-
-                    auto orbit = parse_csv_gp(lineBuffer);
-                    ElsetRec satrec = {};
-                    satrec.whichconst = 2;
-                    satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
-                    satrec.ecco = orbit.eccentricity;
-                    satrec.inclo = orbit.inclination * DEG_TO_RAD;
-                    satrec.nodeo = orbit.raan * DEG_TO_RAD;
-                    satrec.argpo = orbit.arg_pericenter * DEG_TO_RAD;
-                    satrec.mo = orbit.mean_anomaly * DEG_TO_RAD;
-                    satrec.bstar = orbit.bstar;
-                    satrec.jdsatepoch = orbit.epoch;
-
-                    double jdJan1 = csvEpochToJulianDate(orbit.epoch_year, 1, 1, 0, 0, 0.0);
-                    satrec.epochyr = orbit.epoch_year % 100;
-                    satrec.epochdays = orbit.epoch - jdJan1 + 1.0;
-
-                    double jdNow = getCurrentJulianDate();
-
-                    bool success = sgp4init('i', &satrec);
-                    if (!success) {
-                        Serial1.println("SGP4 initialization failed!");
-                    } else {
-                        ElsetRec temp_satrec = satrec;
-                        AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
-                        if (azel.elevation > 0) {
-                            ScreenXY screenxy = azel_to_xy(azel);
-                            /*AzEl previousAzEl = {
-                                .azimuth = azel.azimuth,
-                                .elevation = azel.elevation
-                            };
-                            constexpr double range = 1.0; // 1 day
-                            constexpr double step = 1.0 / 24.0 / 60.0 * 10; // 10 minutes
-                            for (double j = 0; j < range; j += step) {
-                                temp_satrec = satrec;
-                                AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
-                                if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
-                                    continue;
-                                }
-                                if (nextAzEl.elevation > 0 || previousAzEl.elevation > 0) {
-                                    ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
-                                    ScreenXY screenxy_next = azel_to_xy(nextAzEl);
-                                    canvas.drawLine(
-                                        (int32_t) round(screenxy_prev.x),
-                                        (int32_t) round(screenxy_prev.y),
-                                        (int32_t) round(screenxy_next.x),
-                                        (int32_t) round(screenxy_next.y),
-                                        HEX565(0x444444));
-                                }
-                                previousAzEl.azimuth = nextAzEl.azimuth;
-                                previousAzEl.elevation = nextAzEl.elevation;
-                            }*/
-                            drawIcon(screenxy.x, screenxy.y, 0x0000ff, ICON_RADIUS, HUD_PIXEL);
-                        }
-                    }
-                }
-
-                charIndex = 0; // Reset index for next line
-            } else {
-                if (charIndex < sizeof(lineBuffer) - 1) {
-                    lineBuffer[charIndex++] = c;
-                }
-            }
-        }
-        // Yield for 1 tick to let the lwIP Wi-Fi stack process background packets
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    client.stop();
-    Serial1.print(millis() - lastMillis);
-    Serial1.println(" ms");
-    Serial1.println("Rendering done");
-}
 
 void drawSun() {
     predict_observation observation = {};
@@ -697,11 +618,182 @@ void drawSun() {
 }
 
 void drawVipSatellites() {
+    if (!hasTime) {
+        return;
+    }
+    uint32_t lastMillis = millis();
 
+    if (xSemaphoreTake(named_mutex, portMAX_DELAY) == pdTRUE) {
+        Serial1.println("Opening the file (named) for reading");
+        File file = LittleFS.open(named_filename, "r");
+        if (!file) {
+            Serial1.println("Failed to open file for reading");
+            xSemaphoreGive(named_mutex);
+            return;
+        }
+
+        Serial1.println("Starting rendering");
+        size_t charIndex = 0;
+        uint8_t buffer[256];
+        Serial1.print("Available bytes: ");
+        Serial1.println(file.available());
+        Serial1.print("Size: ");
+        Serial1.println(file.size());
+        while (file.available() >= 4) {
+            uint32_t messageSize = 0;
+            file.read((uint8_t*)&messageSize, sizeof(messageSize));
+            if (messageSize > sizeof(buffer)) {
+                Serial1.printf("Error: message size %d exceeds local buffer!\n", messageSize);
+                break;
+            }
+            size_t bytesRead = file.read(buffer, messageSize);
+            if (bytesRead != messageSize) {
+                Serial1.println("Error: incomplete read from flash.");
+                break;
+            }
+
+            auto satellite = tle::Getsatellite_named(buffer);
+
+            auto orbit = OrbitData{
+                satellite->orbit()->MEAN_MOTION(),
+                satellite->orbit()->ECCENTRICITY(),
+                satellite->orbit()->INCLINATION(),
+                satellite->orbit()->RA_OF_ASC_NODE(),
+                satellite->orbit()->ARG_OF_PERICENTER(),
+                satellite->orbit()->MEAN_ANOMALY(),
+                satellite->orbit()->BSTAR(),
+                satellite->orbit()->EPOCH(),
+            };
+            ElsetRec satrec = {};
+            satrec.whichconst = 2;
+            satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
+            satrec.ecco = orbit.eccentricity;
+            satrec.inclo = orbit.inclination * DEG_TO_RAD;
+            satrec.nodeo = orbit.raan * DEG_TO_RAD;
+            satrec.argpo = orbit.arg_pericenter * DEG_TO_RAD;
+            satrec.mo = orbit.mean_anomaly * DEG_TO_RAD;
+            satrec.bstar = orbit.bstar;
+            satrec.jdsatepoch = orbit.epoch;
+
+            double jdNow = getCurrentJulianDate();
+
+            bool success = sgp4init('i', &satrec);
+            if (!success) {
+                Serial1.println("SGP4 initialization failed!");
+            } else {
+                ElsetRec temp_satrec = satrec;
+                AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
+                ScreenXY screenxy = azel_to_xy(azel);
+                AzEl previousAzEl = {
+                    .azimuth = azel.azimuth,
+                    .elevation = azel.elevation
+                };
+                constexpr double range = 1.0; // 1 day
+                constexpr double step = 1.0 / 24.0 / 60.0; // 1 minute
+                for (double j = 0; j < range; j += step) {
+                    temp_satrec = satrec;
+                    AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
+                    if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
+                        continue;
+                    }
+                    if (nextAzEl.elevation > 0 || previousAzEl.elevation > 0) {
+                        ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
+                        ScreenXY screenxy_next = azel_to_xy(nextAzEl);
+                        canvas.drawLine(
+                            (int32_t) round(screenxy_prev.x),
+                            (int32_t) round(screenxy_prev.y),
+                            (int32_t) round(screenxy_next.x),
+                            (int32_t) round(screenxy_next.y),
+                            HEX565(0x011d3f));
+                    }
+                    previousAzEl.azimuth = nextAzEl.azimuth;
+                    previousAzEl.elevation = nextAzEl.elevation;
+                }
+                if (azel.elevation > 0) {
+                    drawIcon(round(screenxy.x), round(screenxy.y), 0x0275ff, ICON_RADIUS, HUD_CROSSHAIR_ARROWS_H);
+                }
+            }
+        }
+        Serial1.print(millis() - lastMillis);
+        Serial1.println(" ms");
+        Serial1.println("Rendering done");
+        file.close();
+        xSemaphoreGive(named_mutex);
+    }
 }
 
 void drawBackgroundSatellites() {
+    if (!hasTime) {
+        return;
+    }
+    uint32_t lastMillis = millis();
 
+    if (xSemaphoreTake(clutter_mutex, 0) == pdTRUE) {
+        Serial1.println("Opening the file (clutter) for reading");
+        File file = LittleFS.open(clutter_filename, "r");
+        if (!file) {
+            Serial1.println("Failed to open file (clutter) for reading");
+        }
+
+        Serial1.println("Starting rendering");
+        size_t charIndex = 0;
+        uint8_t buffer[256];
+        while (file.available() >= 4) {
+            uint32_t messageSize = 0;
+            file.read((uint8_t*)&messageSize, sizeof(messageSize));
+            if (messageSize > sizeof(buffer)) {
+                Serial1.printf("Error: message size %d exceeds local buffer!\n", messageSize);
+                break;
+            }
+            size_t bytesRead = file.read(buffer, messageSize);
+            if (bytesRead != messageSize) {
+                Serial1.println("Error: incomplete read from flash.");
+                break;
+            }
+
+            auto satellite = tle::Getsatellite_clutter(buffer);
+
+            auto orbit = OrbitData{
+                satellite->orbit()->MEAN_MOTION(),
+                satellite->orbit()->ECCENTRICITY(),
+                satellite->orbit()->INCLINATION(),
+                satellite->orbit()->RA_OF_ASC_NODE(),
+                satellite->orbit()->ARG_OF_PERICENTER(),
+                satellite->orbit()->MEAN_ANOMALY(),
+                satellite->orbit()->BSTAR(),
+                satellite->orbit()->EPOCH(),
+            };
+            ElsetRec satrec = {};
+            satrec.whichconst = 2;
+            satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
+            satrec.ecco = orbit.eccentricity;
+            satrec.inclo = orbit.inclination * DEG_TO_RAD;
+            satrec.nodeo = orbit.raan * DEG_TO_RAD;
+            satrec.argpo = orbit.arg_pericenter * DEG_TO_RAD;
+            satrec.mo = orbit.mean_anomaly * DEG_TO_RAD;
+            satrec.bstar = orbit.bstar;
+            satrec.jdsatepoch = orbit.epoch;
+
+            double jdNow = getCurrentJulianDate();
+
+            bool success = sgp4init('i', &satrec);
+            if (!success) {
+                Serial1.println("SGP4 initialization failed!");
+            } else {
+                ElsetRec temp_satrec = satrec;
+                AzEl azel = elset_to_azel(temp_satrec, jdNow, orbit.epoch, observer);
+                if (azel.elevation > 0) {
+                    ScreenXY screenxy = azel_to_xy(azel);
+                    drawIcon(screenxy.x, screenxy.y, 0x888888, ICON_RADIUS, HUD_PIXEL);
+                }
+            }
+        }
+        Serial1.print(millis() - lastMillis);
+        Serial1.println(" ms");
+        Serial1.println("Rendering done");
+        file.close();
+        xSemaphoreGive(clutter_mutex);
+    }
 }
 
 TaskHandle_t xRenderTaskHandle;
@@ -713,10 +805,8 @@ void renderTask(void *pvParameters) {
         drawGrid();
         drawSun();
 
-        drawVipSatellites();
         drawBackgroundSatellites();
-
-        calculateExampleSatellites();
+        drawVipSatellites();
 
         /*
         // calibrate the Az-El conversion engine
@@ -727,9 +817,9 @@ void renderTask(void *pvParameters) {
         */
 
         canvas.pushSprite(0, 0);
-        takeScreenshot();
+        // takeScreenshot();
         led_off();
-        vTaskDelay(pdMS_TO_TICKS(1000 * 10));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -829,6 +919,120 @@ void downloadTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         led_on();
     }
+    while (!hasTime) {
+        led_off();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        led_on();
+    }
+    uint32_t lastMillis = millis();
+    if (xSemaphoreTake(named_mutex, portMAX_DELAY) == pdTRUE) {
+        LittleFS.remove(named_filename);
+        xSemaphoreGive(named_mutex);
+    }
+    if (xSemaphoreTake(clutter_mutex, portMAX_DELAY) == pdTRUE) {
+        LittleFS.remove(named_filename);
+        File file_clutter = LittleFS.open(clutter_filename, "w");
+        if (!file_clutter) {
+            Serial1.println("Failed to open file (clutter) for writing");
+            file_clutter.close();
+            xSemaphoreGive(clutter_mutex);
+            return;
+        }
+
+        WiFiClient client;
+        const char *server_ip = HTTP_SERVER_ADDRESS;
+        uint16_t server_port = HTTP_PORT;
+        const char *csv_path = HTTP_FILE;
+
+        Serial1.printf("Connecting to %s:%d\n", server_ip, server_port);
+
+        if (!client.connect(server_ip, server_port)) {
+            Serial1.println("HTTP connection failed.");
+            file_clutter.close();
+            xSemaphoreGive(clutter_mutex);
+            return;
+        }
+        client.printf("GET /%s HTTP/1.1\r\n", csv_path);
+        client.printf("Host: %s\r\n", server_ip);
+        client.print("Connection: close\r\n\r\n");
+
+        uint8_t consecutiveNewlines = 0;
+        while (client.connected() || client.available()) {
+            if (client.available()) {
+                char c = client.read();
+                if (c == '\r') {
+                    continue; // Ignore carriage returns completely
+                }
+                if (c == '\n') {
+                    consecutiveNewlines++;
+                    if (consecutiveNewlines == 2) {
+                        break; // CSV begins next byte
+                    }
+                } else {
+                    consecutiveNewlines = 0; // Reset if we see normal characters
+                }
+            } else {
+                led_off();
+                vTaskDelay(pdMS_TO_TICKS(1));
+                led_on();
+            }
+        }
+
+        Serial1.println("Starting download");
+        char lineBuffer[256];
+        size_t charIndex = 0;
+
+        while (client.connected() || client.available()) {
+            while (client.available()) {
+                char c = client.read();
+
+                if (c == '\n') {
+                    lineBuffer[charIndex] = '\0'; // Null-terminate
+
+                    // Handle Windows-style lines (\r\n) cleanly
+                    if (charIndex > 0 && lineBuffer[charIndex - 1] == '\r') {
+                        lineBuffer[charIndex - 1] = '\0';
+                    }
+
+                    uint8_t comment_progress = 0;
+                    if (charIndex > 0 && lineBuffer[0] != '#') {
+                        if (strncmp(lineBuffer, "OBJECT_NAME", 11) == 0) {
+                            // Serial1.println("Comment line skipped");
+                            charIndex = 0;
+                            continue;
+                        }
+                        // Serial1.println(lineBuffer);
+
+                        // list of operators that pollute the list with temporary satellites
+                        // drop them to save space, expand this list in case
+                        // more operators start launching temporary satellites
+                        if (strstr(lineBuffer, "STARLINK") != NULL) {
+                            charIndex = 0;
+                            continue;
+                        }
+
+                        parse_csv_gp(lineBuffer, file_clutter, named_filename);
+                    }
+
+                    charIndex = 0; // Reset index for next line
+                } else {
+                    if (charIndex < sizeof(lineBuffer) - 1) {
+                        lineBuffer[charIndex++] = c;
+                    }
+                }
+            }
+            // Yield for 1 tick to let the lwIP Wi-Fi stack process background packets
+            led_off();
+            vTaskDelay(pdMS_TO_TICKS(1));
+            led_on();
+        }
+        client.stop();
+        file_clutter.close();
+        xSemaphoreGive(clutter_mutex);
+        Serial1.print(millis() - lastMillis);
+        Serial1.println(" ms");
+        Serial1.println("Download completed");
+    }
 
     led_off();
     vTaskDelete(NULL);
@@ -846,7 +1050,7 @@ void setup() {
     init_led();
     led_on();
     Serial.begin(1000000);
-    Serial1.begin(115200);
+    Serial1.begin(2000000);
 
     if (!LittleFS.begin()) {
         Serial1.println("An error has occurred while mounting LittleFS!");
@@ -858,6 +1062,15 @@ void setup() {
     tzset();
 
     initDisplay();
+
+    clutter_mutex = xSemaphoreCreateMutex();
+    if (clutter_mutex == NULL) {
+        Serial1.println("Failed to create flash mutex (clutter)");
+    }
+    named_mutex = xSemaphoreCreateMutex();
+    if (named_mutex == NULL) {
+        Serial1.println("Failed to create flash mutex (named)");
+    }
 
     xTaskCreate(downloadTask, "download", 2048, NULL, 0, &xDownloadTaskHandle);
     printMemoryStatus("download");

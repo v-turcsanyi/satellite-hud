@@ -1,2 +1,4 @@
 .pio
 include/credentials.h
+/include/tle_named_generated.h
+/include/tle_clutter_generated.h
