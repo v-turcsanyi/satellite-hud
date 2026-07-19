@@ -48,6 +48,13 @@ uint32_t norad_ids[] = {
     39159, // PROBA-V
     41240, // JASON-3
     24479, // HINODE (SOLAR-B)
+    /*
+    // MERIDIAN (for calibrating the algorithm as they are always visible from here)
+    40296,
+    44453,
+    45254,
+    52145,
+    68571*/
 };
 
 void printMemoryStatus(const char* stepName) {
@@ -313,8 +320,8 @@ ScreenXY azel_to_xy(AzEl azel) {
     double sin_azimuth = sin(azel.azimuth * DEG_TO_RAD);
     double cos_azimuth = cos(azel.azimuth * DEG_TO_RAD);
 
-    this_xy.x = round((sin_azimuth * (90 - max(min(azel.elevation, 90), 0)) * (120.0 / 90.0)) + 120);
-    this_xy.y = round((-cos_azimuth * (90 - max(min(azel.elevation, 90), 0)) * (120.0 / 90.0)) + 120);
+    this_xy.x = round((sin_azimuth * (90 - min(azel.elevation, 90)) * (120.0 / 90.0)) + 120);
+    this_xy.y = round((-cos_azimuth * (90 - min(azel.elevation, 90)) * (120.0 / 90.0)) + 120);
 
     return this_xy;
 }
@@ -690,13 +697,17 @@ void drawVipSatellites() {
                 };
                 constexpr double range = 1.0; // 1 day
                 constexpr double step = 1.0 / 24.0 / 60.0; // 1 minute
+                bool next_pass_found = false;
                 for (double j = 0; j < range; j += step) {
                     temp_satrec = satrec;
                     AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
                     if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
                         continue;
                     }
-                    if (nextAzEl.elevation > 0 || previousAzEl.elevation > 0) {
+                    if (nextAzEl.elevation > 0) {
+                        next_pass_found = true;
+                    }
+                    if (next_pass_found) {
                         ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
                         ScreenXY screenxy_next = azel_to_xy(nextAzEl);
                         canvas.drawLine(
@@ -705,11 +716,34 @@ void drawVipSatellites() {
                             (int32_t) round(screenxy_next.x),
                             (int32_t) round(screenxy_next.y),
                             HEX565(0x011d3f));
+                        if (nextAzEl.elevation < 0) {
+                            break;
+                        }
                     }
                     previousAzEl.azimuth = nextAzEl.azimuth;
                     previousAzEl.elevation = nextAzEl.elevation;
                 }
                 if (azel.elevation > 0) {
+                    for (double j = 0; j > -range; j -= step) {
+                        temp_satrec = satrec;
+                        AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
+                        if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
+                            continue;
+                        }
+                        ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
+                        ScreenXY screenxy_next = azel_to_xy(nextAzEl);
+                        canvas.drawLine(
+                            (int32_t) round(screenxy_prev.x),
+                            (int32_t) round(screenxy_prev.y),
+                            (int32_t) round(screenxy_next.x),
+                            (int32_t) round(screenxy_next.y),
+                            HEX565(0x011d3f));
+                        if (nextAzEl.elevation < 0) {
+                            break;
+                        }
+                        previousAzEl.azimuth = nextAzEl.azimuth;
+                        previousAzEl.elevation = nextAzEl.elevation;
+                    }
                     drawIcon(round(screenxy.x), round(screenxy.y), 0x0275ff, ICON_RADIUS, HUD_CROSSHAIR_ARROWS_H);
                 }
             }
