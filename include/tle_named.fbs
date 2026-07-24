@@ -4,13 +4,13 @@ namespace tle;
 // not all fields are actually used
 struct OrbitParameters_named {
     EPOCH:double;
-    MEAN_MOTION:double;
-    ECCENTRICITY:double;
-    INCLINATION:double;
-    RA_OF_ASC_NODE:double;
-    ARG_OF_PERICENTER:double;
-    MEAN_ANOMALY:double;
-    BSTAR:double;
+    MEAN_MOTION:float;
+    ECCENTRICITY:float;
+    INCLINATION:float;
+    RA_OF_ASC_NODE:float;
+    ARG_OF_PERICENTER:float;
+    MEAN_ANOMALY:float;
+    BSTAR:float;
 }
 
 table satellite_named{

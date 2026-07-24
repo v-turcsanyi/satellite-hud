@@ -35,19 +35,21 @@ typedef struct SatelliteRenderable {
 uint32_t norad_ids[] = {
     // various
     25544, // ISS (ZARYA)
-    // L bamd
+    // L band
     57166, // METEOR-M2 3
     59051, // METEOR-M2 4
     38771, // METOP-B
     43689, // METOP-C
     60543, // ARCTIC WEATHER SATELLITE
     41105, // ELEKTRO-L 2
+    /*
     // S band
     26958, // PROBA-1
     36037, // PROBA-2
     39159, // PROBA-V
     41240, // JASON-3
     24479, // HINODE (SOLAR-B)
+    */
     /*
     // MERIDIAN (for calibrating the algorithm as they are always visible from here)
     40296,
@@ -101,20 +103,38 @@ struct OrbitData {
     // double mean_dot; // not used in SGP4
     // double mean_ddot;
     double epoch;
-    /* // these fields take up space unnecessarily
-    int epoch_year;
-    int epoch_month;
-    int epoch_day;
-    int epoch_hour;
-    int epoch_minute;
-    double epoch_second;
-    */
 };
+
+struct AzEl{
+    double azimuth;
+    double elevation;
+};
+
+struct __attribute__((packed)) ScreenXY{
+    uint8_t x;
+    uint8_t y;
+};
+
+struct NamedSatellite{
+    ScreenXY position;
+    char name[25];
+};
+
+// TODO: allocate after the size is known
+ScreenXY* satellites_clutter = nullptr;
+uint32_t satellites_clutter_count = 0;
+NamedSatellite* satellites_named = nullptr;
+uint32_t satellites_named_count = 0;
 
 // TODO: get from GPS server
 constexpr double my_latitude = 47.0;
 constexpr double my_longitude = 19.0;
 constexpr double my_altitude = 102.0;
+
+static uint32_t total_satellites_clutter = 0;
+static uint32_t total_satellites_vip = 0;
+static uint32_t total_satellites_skipped = 0;
+
 
 uint8_t led_depth = 0;
 
@@ -296,16 +316,6 @@ void takeScreenshot() {
         Serial.print("\033[0m\r\n");
     }
 }
-
-struct AzEl{
-    double azimuth;
-    double elevation;
-};
-
-struct ScreenXY{
-    double x;
-    double y;
-};
 
 AzEl tle_to_azel() {
     AzEl this_azel = {
@@ -528,13 +538,13 @@ void parse_csv_gp(const char* csv, File output_file, const char *vip_file_path) 
             }
             const tle::OrbitParameters_named orbit_parameters{
                 epochJd,
-                sat.n,
-                sat.ecc,
-                sat.incDeg,
-                sat.raanDeg,
-                sat.argpDeg,
-                sat.maDeg,
-                sat.bstar
+                static_cast<float>(sat.n),
+                static_cast<float>(sat.ecc),
+                static_cast<float>(sat.incDeg),
+                static_cast<float>(sat.raanDeg),
+                static_cast<float>(sat.argpDeg),
+                static_cast<float>(sat.maDeg),
+                static_cast<float>(sat.bstar)
             };
             const auto serialized_name = builder.CreateString(satName);
             flatbuffers::Offset<tle::satellite_named> serialized = tle::Createsatellite_named(
@@ -548,17 +558,18 @@ void parse_csv_gp(const char* csv, File output_file, const char *vip_file_path) 
             builder.Clear();
             file_vip.close();
             xSemaphoreGive(named_mutex);
+            total_satellites_vip++;
         }
     }else {
         const tle::OrbitParameters_clutter orbit_parameters{
             epochJd,
-            sat.n,
-            sat.ecc,
-            sat.incDeg,
-            sat.raanDeg,
-            sat.argpDeg,
-            sat.maDeg,
-            sat.bstar
+            static_cast<float>(sat.n),
+            static_cast<float>(sat.ecc),
+            static_cast<float>(sat.incDeg),
+            static_cast<float>(sat.raanDeg),
+            static_cast<float>(sat.argpDeg),
+            static_cast<float>(sat.maDeg),
+            static_cast<float>(sat.bstar)
         };
         flatbuffers::Offset<tle::satellite_clutter> serialized = tle::Createsatellite_clutter(
             builder,
@@ -567,6 +578,7 @@ void parse_csv_gp(const char* csv, File output_file, const char *vip_file_path) 
         builder.FinishSizePrefixed(serialized);
         output_file.write(builder.GetBufferPointer(), builder.GetSize());
         builder.Clear();
+        total_satellites_clutter++;
     }
 }
 
@@ -698,14 +710,16 @@ void drawVipSatellites() {
                 constexpr double range = 1.0; // 1 day
                 constexpr double step = 1.0 / 24.0 / 60.0; // 1 minute
                 bool next_pass_found = false;
+                double next_pass_time = 0.0;
                 for (double j = 0; j < range; j += step) {
                     temp_satrec = satrec;
                     AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
                     if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
                         continue;
                     }
-                    if (nextAzEl.elevation > 0) {
+                    if ((nextAzEl.elevation > 15 || azel.elevation > 0) && !next_pass_found) {
                         next_pass_found = true;
+                        next_pass_time = jdNow + j;
                     }
                     if (next_pass_found) {
                         ScreenXY screenxy_prev = azel_to_xy(previousAzEl);
@@ -716,17 +730,17 @@ void drawVipSatellites() {
                             (int32_t) round(screenxy_next.x),
                             (int32_t) round(screenxy_next.y),
                             HEX565(0x011d3f));
-                        if (nextAzEl.elevation < 0) {
+                        if (nextAzEl.elevation < 0 /*|| (screenxy_next.x == screenxy.x && screenxy_next.y == screenxy.y && !(j < step && j > -step))*/) {
                             break;
                         }
                     }
                     previousAzEl.azimuth = nextAzEl.azimuth;
                     previousAzEl.elevation = nextAzEl.elevation;
                 }
-                if (azel.elevation > 0) {
+                if (next_pass_found || azel.elevation > 0) {
                     for (double j = 0; j > -range; j -= step) {
                         temp_satrec = satrec;
-                        AzEl nextAzEl = elset_to_azel(temp_satrec, jdNow + j, orbit.epoch, observer);
+                        AzEl nextAzEl = elset_to_azel(temp_satrec, next_pass_time + j, orbit.epoch, observer);
                         if (isnan(nextAzEl.azimuth) || isnan(nextAzEl.elevation)) {
                             continue;
                         }
@@ -738,12 +752,14 @@ void drawVipSatellites() {
                             (int32_t) round(screenxy_next.x),
                             (int32_t) round(screenxy_next.y),
                             HEX565(0x011d3f));
-                        if (nextAzEl.elevation < 0) {
+                        if (nextAzEl.elevation < 0 /*|| (screenxy_next.x == screenxy.x && screenxy_next.y == screenxy.y && !(j < step && j > -step))*/) {
                             break;
                         }
                         previousAzEl.azimuth = nextAzEl.azimuth;
                         previousAzEl.elevation = nextAzEl.elevation;
                     }
+                }
+                if (azel.elevation > 0) {
                     drawIcon(round(screenxy.x), round(screenxy.y), 0x0275ff, ICON_RADIUS, HUD_CROSSHAIR_ARROWS_H);
                 }
             }
@@ -837,9 +853,10 @@ void renderTask(void *pvParameters) {
         led_on();
 
         drawGrid();
-        drawSun();
 
         drawBackgroundSatellites();
+        drawSun();
+
         drawVipSatellites();
 
         /*
@@ -1042,6 +1059,7 @@ void downloadTask(void *pvParameters) {
                         // more operators start launching temporary satellites
                         if (strstr(lineBuffer, "STARLINK") != NULL) {
                             charIndex = 0;
+                            total_satellites_skipped++;
                             continue;
                         }
 
@@ -1061,11 +1079,34 @@ void downloadTask(void *pvParameters) {
             led_on();
         }
         client.stop();
+        uint32_t clutter_size = file_clutter.size();
         file_clutter.close();
         xSemaphoreGive(clutter_mutex);
+        uint32_t named_size = 0;
+        if (xSemaphoreTake(named_mutex, portMAX_DELAY) == pdTRUE) {
+            File file_named = LittleFS.open(named_filename, "r");
+            named_size = file_named.size();
+            file_named.close();
+            xSemaphoreGive(named_mutex);
+        }
         Serial1.print(millis() - lastMillis);
         Serial1.println(" ms");
         Serial1.println("Download completed");
+        Serial1.println();
+        Serial1.printf(
+            "Total satellites: \033[4m%d\033[24m\n-SKIPPED: \033[31m%d\033[0m\n-PROCESSED: \033[34m%d\033[0m (%d kB)\n--NAMED: \033[32m%d\033[0m (%d kB)\n--CLUTTER: \033[34m%d\033[0m (%d kB)",
+            total_satellites_clutter + total_satellites_vip + total_satellites_skipped,
+            total_satellites_skipped,
+            total_satellites_clutter + total_satellites_vip,
+            (clutter_size + named_size) / 1000,
+            total_satellites_vip,
+            named_size / 1000,
+            total_satellites_clutter,
+            clutter_size / 1000
+            );
+        Serial1.println();
+        Serial1.println();
+        Serial1.println();
     }
 
     led_off();
@@ -1109,11 +1150,11 @@ void setup() {
     xTaskCreate(downloadTask, "download", 2048, NULL, 0, &xDownloadTaskHandle);
     printMemoryStatus("download");
     xTaskCreate(renderTask, "render", 2048, NULL, 2, &xRenderTaskHandle);
-    printMemoryStatus("diagnostics");
+    printMemoryStatus("render");
     xTaskCreate(wifiTask, "wifi", 1024, NULL, 1, &xWifiTaskHandle);
-    printMemoryStatus("diagnostics");
+    printMemoryStatus("wifi");
     xTaskCreate(timeSyncTask, "timesync", 1024, NULL, 1, &xTimeSyncTaskHandle);
-    printMemoryStatus("diagnostics");
+    printMemoryStatus("timesync");
     xTaskCreate(bgWorkerTask, "calculate1", 512, NULL, 0, &xBgWorkerTaskHandle1);
     printMemoryStatus("calculate1");
     xTaskCreate(bgWorkerTask, "calculate2", 512, NULL, 0, &xBgWorkerTaskHandle2);
@@ -1126,7 +1167,10 @@ void setup() {
     vTaskCoreAffinitySet(xWifiTaskHandle, (1 << 0));
     vTaskCoreAffinitySet(xTimeSyncTaskHandle, (1 << 0));
 
+    vTaskCoreAffinitySet(xDownloadTaskHandle, (1 << 0));
+
     vTaskCoreAffinitySet(xRenderTaskHandle, (1 << 1));
+    vTaskCoreAffinitySet(xMemoryDiagnosticsTaskHandle, (1 << 1));
     led_off();
 }
 
