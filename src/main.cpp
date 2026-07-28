@@ -128,9 +128,9 @@ NamedSatellite* satellites_named = nullptr;
 uint32_t satellites_named_count = 0;
 
 // TODO: get from GPS server
-constexpr double my_latitude = 47.0;
-constexpr double my_longitude = 19.0;
-constexpr double my_altitude = 102.0;
+constexpr double my_latitude = LATITUDE;
+constexpr double my_longitude = LONGITUDE;
+constexpr double my_altitude = ALTITUDE;
 
 static uint32_t total_satellites_clutter = 0;
 static uint32_t total_satellites_vip = 0;
