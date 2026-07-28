@@ -93,13 +93,13 @@ enum HudStyle : uint8_t {
 };
 
 struct OrbitData {
-    double mean_motion;
-    double eccentricity;
-    double inclination;
-    double raan;
-    double arg_pericenter;
-    double mean_anomaly;
-    double bstar;
+    float mean_motion;
+    float eccentricity;
+    float inclination;
+    float raan;
+    float arg_pericenter;
+    float mean_anomaly;
+    float bstar;
     // double mean_dot; // not used in SGP4
     // double mean_ddot;
     double epoch;
@@ -117,10 +117,11 @@ struct __attribute__((packed)) ScreenXY{
 
 struct NamedSatellite{
     ScreenXY position;
+    ScreenXY pass1[128];
+    ScreenXY pass2[128];
     char name[25];
 };
 
-// TODO: allocate after the size is known
 ScreenXY* satellites_clutter = nullptr;
 uint32_t satellites_clutter_count = 0;
 NamedSatellite* satellites_named = nullptr;
@@ -658,6 +659,7 @@ void drawVipSatellites() {
         Serial1.println(file.available());
         Serial1.print("Size: ");
         Serial1.println(file.size());
+        ElsetRec satrec = {};
         while (file.available() >= 4) {
             uint32_t messageSize = 0;
             file.read((uint8_t*)&messageSize, sizeof(messageSize));
@@ -683,7 +685,6 @@ void drawVipSatellites() {
                 satellite->orbit()->BSTAR(),
                 satellite->orbit()->EPOCH(),
             };
-            ElsetRec satrec = {};
             satrec.whichconst = 2;
             satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
             satrec.ecco = orbit.eccentricity;
@@ -778,6 +779,7 @@ void drawBackgroundSatellites() {
     }
     uint32_t lastMillis = millis();
 
+    ElsetRec satrec = {};
     if (xSemaphoreTake(clutter_mutex, 0) == pdTRUE) {
         Serial1.println("Opening the file (clutter) for reading");
         File file = LittleFS.open(clutter_filename, "r");
@@ -813,7 +815,6 @@ void drawBackgroundSatellites() {
                 satellite->orbit()->BSTAR(),
                 satellite->orbit()->EPOCH(),
             };
-            ElsetRec satrec = {};
             satrec.whichconst = 2;
             satrec.no_kozai = orbit.mean_motion * REVS_DAY_TO_RAD_MIN;
             satrec.ecco = orbit.eccentricity;
@@ -1073,7 +1074,7 @@ void downloadTask(void *pvParameters) {
                     }
                 }
             }
-            // Yield for 1 tick to let the lwIP Wi-Fi stack process background packets
+            // Yield for 1 ms to let the lwIP Wi-Fi stack process background packets
             led_off();
             vTaskDelay(pdMS_TO_TICKS(1));
             led_on();
@@ -1107,6 +1108,12 @@ void downloadTask(void *pvParameters) {
         Serial1.println();
         Serial1.println();
         Serial1.println();
+
+        printMemoryStatus("Before allocating VIP array");
+        satellites_named_count = total_satellites_vip;
+        delete[] satellites_named;
+        satellites_named = new NamedSatellite[satellites_named_count];
+        printMemoryStatus("After allocating VIP array");
     }
 
     led_off();
@@ -1117,7 +1124,7 @@ void initDisplay() {
     tft.init();
     tft.setRotation(0);
     tft.initDMA();
-
+    // canvas.setColorDepth(8);
     canvas.createSprite(240, 240);
 }
 
@@ -1126,6 +1133,7 @@ void setup() {
     led_on();
     Serial.begin(1000000);
     Serial1.begin(2000000);
+    set_sys_clock_khz(250000, true);
 
     if (!LittleFS.begin()) {
         Serial1.println("An error has occurred while mounting LittleFS!");
